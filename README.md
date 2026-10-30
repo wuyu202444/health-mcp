@@ -59,6 +59,8 @@ curl http://127.0.0.1:3100/healthz   # 返回 {"ok":true,...}
 - `time_range`：`today` 或 `three_days`
 - `days`：除 `current_status` 外可自定义读取 1～62 天；传入后优先于 `time_range`
 - `heart_rate_detail`：仅用于 `heart_rate`，可选 `daily` 或 `hourly`；小时模式只返回每小时统计，不返回原始样本
+- `workout_id`：仅用于 `workouts`，指定列表中的 ID，读取该次跑步的完整指标和曲线
+- `sample_offset` / `sample_limit`：运动曲线分页，默认起点 0、每页 300 点，最多 500 点；按 `next_sample_offset` 继续
 
 不传参数时返回紧凑的当前状态。`daily_summary` 每天包含步数、卡路里、心率、血氧、压力和睡眠摘要；
 `all` 还会附带睡眠明细与运动摘要。读取结果可能附带 `cycle` 经期上下文。
@@ -67,6 +69,17 @@ curl http://127.0.0.1:3100/healthz   # 返回 {"ok":true,...}
 从新到旧排列，每条包含归属日期 `date`、稳定 ID、运动类型编码、起止时间、时区、采集时间、
 运动与总时长（秒）、距离（米）、活动卡路里和平均/最低/最高心率；缺失数值为 `null`，
 没有记录时返回空数组。`all` 的 `workouts` 使用相同字段与时间范围。
+
+支持完整跑步上传的 App 还可以附带 `workouts[].details`。列表和 `all` 默认只增加
+`detail_sample_count` / `recovery_sample_count`，不展开曲线。指定 `workout_id` 后返回
+`workout` 摘要和 `details`：已记录的数值指标与单位、设备汇总值、分段配速、恢复心率
+曲线及分页运动采样。没有明细时 `details` 为 `null`；ID 不在所选日期范围内时
+`found` 为 `false`。普通摘要重传不会清除既有明细，重复采样按时间戳合并。
+
+心率、速度、步频、步幅等仅在源数据存在时保留，不补造未测得的指标；恢复心率以
+第一条恢复采样为相对时间起点，不自动推断停跑后一分钟/两分钟的下降值。
+仅接收约定字段，不保存 GPS 坐标或路线。完整字段、单位、容量和手机端开关见
+[跑步指标协议](https://github.com/wuyu202444/band-health-sync/blob/running-metrics/docs/running-metrics.md)。
 
 查询睡眠 HRV：`health_read({"data_type":"sleep_hrv","days":14})`。结果的 `sleep_hrv`
 按醒来时间从新到旧排列，包含醒来日期 `date`、来源 `source`、入睡和醒来时间

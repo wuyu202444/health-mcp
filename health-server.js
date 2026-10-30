@@ -8,6 +8,7 @@ const { hostHeaderValidation } = require("@modelcontextprotocol/sdk/server/middl
 const { z } = require("zod");
 const { buildAllowedHosts, installRequestObservability, mountMcpEndpoint } = require("./shared/http-runtime");
 const { normalizeSleepHrv, mergeSleepHrv } = require("./shared/sleep-hrv");
+const { normalizeRunningDetails, mergeRunningDetails, runningDetailPage } = require("./shared/running-details");
 
 const DEFAULT_DATA_DIR = "/var/lib/health-mcp";
 const VALID_TYPES = new Set(["steps", "heart_rate", "sleep", "sleep_hrv", "all"]);
@@ -276,7 +277,7 @@ function normalizeWorkoutSummary(raw) {
     throw new Error("average heart rate is outside its range");
   }
 
-  return {
+  const normalized = {
     id: raw.id,
     raw_type: rawType,
     activity_kind: activityKind,
@@ -292,6 +293,9 @@ function normalizeWorkoutSummary(raw) {
     min_heart_rate: minHeartRate,
     max_heart_rate: maxHeartRate,
   };
+  const details = normalizeRunningDetails(raw.details, normalized);
+  if (details) normalized.details = details;
+  return normalized;
 }
 
 function mergeWorkoutSummaries(stored, incoming) {
@@ -306,7 +310,11 @@ function mergeWorkoutSummaries(stored, incoming) {
     }
     const position = positions.get(normalized.id);
     if (position !== undefined) {
-      if (replace) workouts[position] = normalized;
+      if (replace) {
+        const details = mergeRunningDetails(workouts[position].details, normalized.details, normalized);
+        if (details) normalized.details = details;
+        workouts[position] = normalized;
+      }
       return;
     }
     if (workouts.length >= MAX_WORKOUTS_PER_DAY) return;
@@ -558,9 +566,17 @@ function hourlyHeartRateSummaries(records) {
   return [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([hour, values]) => ({ hour, hr_max: Math.max(...values), hr_min: Math.min(...values), hr_avg: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length), sample_count: values.length }));
 }
 
-function workoutSummaries(records) {
+function workoutSummaries(records, includeDetails = false) {
   return records.flatMap((record) => mergeWorkoutSummaries([], Array.isArray(record.workouts) ? record.workouts : [])
-    .map((workout) => ({ date: record.date, ...workout })))
+    .map((workout) => {
+      const row = { date: record.date, ...workout };
+      if (!includeDetails && row.details) {
+        row.detail_sample_count = row.details.samples.length;
+        row.recovery_sample_count = row.details.recovery_heart_rate?.values_bpm.length || 0;
+        delete row.details;
+      }
+      return row;
+    }))
     .sort((a, b) => b.start_time.localeCompare(a.start_time) || a.id.localeCompare(b.id));
 }
 
@@ -592,7 +608,15 @@ function readHealthToolResult(dataDir, args = {}) {
     return args.heart_rate_detail === "hourly" ? { ...result, detail: "hourly", hourly_summaries: hourlyHeartRateSummaries(records) } : result;
   }
   if (dataType === "sleep") return withCycle({ ...range, recent_sleep_list: sleep, sleep_hrv: sleepHrv });
-  if (dataType === "workouts") return withCycle({ ...range, workouts: workoutSummaries(records) });
+  if (dataType === "workouts") {
+    if (typeof args.workout_id === "string") {
+      const workout = workoutSummaries(records, true).find(row => row.id === args.workout_id);
+      const offset = Number.isSafeInteger(args.sample_offset) && args.sample_offset >= 0 ? args.sample_offset : 0;
+      const limit = Number.isSafeInteger(args.sample_limit) && args.sample_limit >= 1 && args.sample_limit <= 500 ? args.sample_limit : 300;
+      return withCycle({ ...range, found: !!workout, ...(workout ? runningDetailPage(workout, offset, limit) : {workout:null, details:null}) });
+    }
+    return withCycle({ ...range, workouts: workoutSummaries(records) });
+  }
   if (dataType === "daily_summary") return withCycle({ ...range, summaries });
   return withCycle({ ...range, latest_heart_rate: records.map(latestSample).find((value) => value !== null) ?? null, today_heart_rate: latestSample(todayRecord), spo2: nullableNumber(todayRecord.spo2 ?? todayRecord.blood_oxygen), stress: nullableNumber(todayRecord.stress), today_steps: summaries.find((summary) => summary.date === today)?.steps ?? null, today_calories: summaries.find((summary) => summary.date === today)?.calories ?? null, recent_sleep_list: sleep, sleep_hrv: sleepHrv, workouts: workoutSummaries(records), summaries });
 }
@@ -624,6 +648,9 @@ function buildSummaryText(records) {
 function createHealthMcpServer(dataDir) {
   const server = new McpServer({ name: "health", version: "1.1.0" });
   server.tool("health_read", "读取健康数据：当前状态、步数、心率、睡眠、运动摘要、每日摘要或完整数据。", {
+    workout_id: z.string().min(1).max(128).optional().describe("仅用于 workouts：指定列表中的 id，读取这次跑步的全部汇总指标、分段配速、恢复心率和分页曲线。默认列表不展开曲线。"),
+    sample_offset: z.number().int().min(0).max(20000).optional().describe("运动曲线采样起点，默认 0。"),
+    sample_limit: z.number().int().min(1).max(500).optional().describe("每页运动曲线点数，默认 300；使用 next_sample_offset 继续读取。"),
     data_type: z.enum(DATA_TYPES).optional().describe("读取类别；省略时为当前状态。"),
     time_range: z.enum(TIME_RANGES).optional().describe("today 为今天，three_days 为最近三天；省略时为最近三天。"),
     heart_rate_detail: z.enum(HEART_RATE_DETAILS).optional().describe("仅用于 heart_rate：daily 为每日统计，hourly 附加每小时统计；省略时为 daily。"),
