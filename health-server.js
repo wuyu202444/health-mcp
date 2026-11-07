@@ -10,9 +10,11 @@ const { buildAllowedHosts, installRequestObservability, mountMcpEndpoint } = req
 const { normalizeSleepHrv, mergeSleepHrv } = require("./shared/sleep-hrv");
 const { normalizeRunningDetails, mergeRunningDetails, runningDetailPage } = require("./shared/running-details");
 
+const { normalizeArrhythmia, mergeArrhythmia } = require("./shared/arrhythmia");
+
 const DEFAULT_DATA_DIR = "/var/lib/health-mcp";
 const VALID_TYPES = new Set(["steps", "heart_rate", "sleep", "sleep_hrv", "all"]);
-const DATA_TYPES = ["current_status", "steps", "heart_rate", "sleep", "sleep_hrv", "workouts", "daily_summary", "all"];
+const DATA_TYPES = ["current_status", "steps", "heart_rate", "sleep", "sleep_hrv", "arrhythmia", "workouts", "daily_summary", "all"];
 const TIME_RANGES = ["three_days", "today"];
 const HEART_RATE_DETAILS = ["daily", "hourly"];
 const MAX_READ_DAYS = 62;
@@ -427,6 +429,22 @@ function mergeHealthData(dataDir, body) {
     current.heart_rate.updatedAt = now;
   }
 
+  // Use measurement date, preserve ordinary data and keep result interpretation unresolved.
+  if (Array.isArray(body.arrhythmia)) {
+    for (const raw of body.arrhythmia.slice(0, 256)) {
+      const row = normalizeArrhythmia(raw);
+      if (!row) continue;
+      const measuredDate = formatLocalDate(new Date(row.measured_at));
+      if (measuredDate === date) current.arrhythmia = mergeArrhythmia(current.arrhythmia, [row]);
+      else {
+        const target = recordPath(dataDir, measuredDate);
+        const record = readRecord(target, { date: measuredDate });
+        record.arrhythmia = mergeArrhythmia(record.arrhythmia, [row]);
+        writeRecordAtomic(target, record);
+      }
+    }
+  }
+
   if (Array.isArray(body.workouts)) {
     const workouts = mergeWorkoutSummaries(current.workouts, body.workouts);
     if (workouts.length) current.workouts = workouts;
@@ -597,10 +615,13 @@ function readHealthToolResult(dataDir, args = {}) {
   const sleepHrv = records.map((record) => ({ date: record.date, value: normalizeSleepHrv(record.sleep_hrv) }))
     .filter((record) => record.value).map((record) => ({ date: record.date, ...record.value }))
     .sort((a, b) => Date.parse(b.sleep_end) - Date.parse(a.sleep_end));
+  const arrhythmia = records.flatMap(record => mergeArrhythmia([], record.arrhythmia))
+    .sort((a, b) => b.measured_at.localeCompare(a.measured_at));
   const resultBase = { success: true, data_type: dataType };
   const withCycle = (result) => todayRecord.cycle ? { ...result, cycle: todayRecord.cycle } : result;
-  if (dataType === "current_status") return withCycle({ ...resultBase, today_steps: summaries.find((summary) => summary.date === today)?.steps ?? null, today_calories: summaries.find((summary) => summary.date === today)?.calories ?? null, heart_rate: latestSample(todayRecord), spo2: nullableNumber(todayRecord.spo2 ?? todayRecord.blood_oxygen), stress: nullableNumber(todayRecord.stress), latest_sleep: sleep[0] || null, latest_sleep_hrv: sleepHrv[0] || null });
+  if (dataType === "current_status") return withCycle({ ...resultBase, today_steps: summaries.find((summary) => summary.date === today)?.steps ?? null, today_calories: summaries.find((summary) => summary.date === today)?.calories ?? null, heart_rate: latestSample(todayRecord), spo2: nullableNumber(todayRecord.spo2 ?? todayRecord.blood_oxygen), stress: nullableNumber(todayRecord.stress), latest_sleep: sleep[0] || null, latest_sleep_hrv: sleepHrv[0] || null, latest_arrhythmia: arrhythmia[0] || null });
   const range = { ...resultBase, time_range: timeRange, days };
+  if (dataType === "arrhythmia") return withCycle({ ...range, arrhythmia });
   if (dataType === "sleep_hrv") return withCycle({ ...range, sleep_hrv: sleepHrv });
   if (dataType === "steps") return withCycle({ ...range, today_steps: summaries.find((summary) => summary.date === today)?.steps ?? null, summaries: summaries.map(({ date, steps, calories }) => ({ date, steps, calories })) });
   if (dataType === "heart_rate") {
@@ -618,7 +639,7 @@ function readHealthToolResult(dataDir, args = {}) {
     return withCycle({ ...range, workouts: workoutSummaries(records) });
   }
   if (dataType === "daily_summary") return withCycle({ ...range, summaries });
-  return withCycle({ ...range, latest_heart_rate: records.map(latestSample).find((value) => value !== null) ?? null, today_heart_rate: latestSample(todayRecord), spo2: nullableNumber(todayRecord.spo2 ?? todayRecord.blood_oxygen), stress: nullableNumber(todayRecord.stress), today_steps: summaries.find((summary) => summary.date === today)?.steps ?? null, today_calories: summaries.find((summary) => summary.date === today)?.calories ?? null, recent_sleep_list: sleep, sleep_hrv: sleepHrv, workouts: workoutSummaries(records), summaries });
+  return withCycle({ ...range, latest_heart_rate: records.map(latestSample).find((value) => value !== null) ?? null, today_heart_rate: latestSample(todayRecord), spo2: nullableNumber(todayRecord.spo2 ?? todayRecord.blood_oxygen), stress: nullableNumber(todayRecord.stress), today_steps: summaries.find((summary) => summary.date === today)?.steps ?? null, today_calories: summaries.find((summary) => summary.date === today)?.calories ?? null, recent_sleep_list: sleep, sleep_hrv: sleepHrv, arrhythmia, workouts: workoutSummaries(records), summaries });
 }
 
 function buildSummaryText(records) {

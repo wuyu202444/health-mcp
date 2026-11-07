@@ -122,3 +122,7 @@ MIT（本服务端为独立代码）。手机端 Gadgetbridge fork 是 AGPLv3、
 
 完整端到端图文教程（含手机端安装、连手环、接入 AI）：
 <https://github.com/xiaoyou5602/band-health-sync/blob/master/docs/GUIDE.md>
+
+### Pulse-wave arrhythmia device records
+
+Optional `arrhythmia` rows contain measurement time, source `huawei_ppg_arrhythmia`, format version, and the numeric fields `field_700004347` / `field_700004809` when available. Field meanings have not been verified. The server always returns `interpretation: unresolved`, drops diagnoses and waveform data, and deduplicates by measurement time. An empty list does not mean no abnormality. Read with `health_read({data_type: "arrhythmia", days: 7})`; records also appear in `all` and `current_status.latest_arrhythmia`.
